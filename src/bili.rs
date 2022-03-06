@@ -1,5 +1,6 @@
 use miniz_oxide::inflate;
 use regex::Regex;
+use tracing::{error, info};
 
 pub struct BiliPacket{
     packet_len: i32,
@@ -7,7 +8,7 @@ pub struct BiliPacket{
     version: i32,
     pub op: i32,
     seq: i32,
-    pub body: Option<String>,
+    pub body: Vec<Option<String>>,
 }
 
 
@@ -47,7 +48,7 @@ pub fn decode(buffer: Vec<u8>) -> BiliPacket {
         version: read_int(&buffer, 6, 2),
         op: read_int(&buffer, 8, 4),
         seq: read_int(&buffer, 12, 4),
-        body: Some("{}".to_string()),
+        body: Vec::new(),
     };
     match result.op {
         5 => {
@@ -65,12 +66,12 @@ pub fn decode(buffer: Vec<u8>) -> BiliPacket {
                         let seperator = Regex::new(r"[\x00-\x1f]+").expect("Invalid regex");
                         for item in reg_split(&seperator, &decoded_str) {
                             if item.contains("{"){
-                                result.body = Some(item.to_string());
+                                result.body.push(Some(item.to_string()));
                             }
                         }
                     }
                     Err(_) => {
-                        println!("decode error");
+                        error!("decode error");
                     }
                 }
                 offset += packet_len;
@@ -79,7 +80,7 @@ pub fn decode(buffer: Vec<u8>) -> BiliPacket {
         3 => {
             let count = read_int(&buffer, 16, 4);
             let fragment = "{\"count\": ".to_string() + &count.to_string() + "}";
-            result.body = Some(fragment);
+            result.body.push(Some(fragment));
 
         },
 
@@ -87,7 +88,6 @@ pub fn decode(buffer: Vec<u8>) -> BiliPacket {
             //
         },
     }
-
     result
 }
 
@@ -109,6 +109,8 @@ fn reg_split<'a>(r: &Regex, text: &'a str) -> Vec<&'a str> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
 
     #[test]
@@ -143,4 +145,5 @@ mod tests {
         let buffer = vec![0u8];
         decode(buffer);
     }
+
 }

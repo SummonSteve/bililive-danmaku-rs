@@ -1,118 +1,118 @@
 mod bili;
 
 use futures_channel::mpsc;
-use futures_util::{future, pin_mut, StreamExt};
+use futures_util::{StreamExt, SinkExt};
 use serde_json::Value;
 use std::time::Duration;
 use tokio::time;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
-    let url = Url::parse("wss://broadcastlv.chat.bilibili.com/sub").unwrap();
-    let (tx, rx) = futures_channel::mpsc::unbounded();
-    let (ws_stream, response) = connect_async(url).await.expect("Failed to connect");
-    let (write, read) = ws_stream.split();
+    tracing_subscriber::fmt::init();
 
-    println!("Status code: {}", response.status());
+    let url = Url::parse("wss://broadcastlv.chat.bilibili.com/sub").unwrap();
+    let (ws_stream, response) = connect_async(url).await.expect("Failed to connect");
+    let (mut write, mut read) = ws_stream.split();
+
+    info!("Status code: {}", response.status());
     for (ref header, _value) in response.headers() {
-        println!("{}: {:?}", header, _value);
+        info!("{}: {:?}", header, _value);
     }
 
-    let handshake = bili::encode("{\"roomid\": Replace with room_id here}", 7);
-    tx.unbounded_send(Message::binary(handshake)).unwrap();
+    let handshake_packet = bili::encode("{\"roomid\": 21129652}", 7);
+    let mut interval = time::interval(Duration::from_secs(30));
 
-    tokio::spawn(heartbeat(tx));
-    let to_ws = rx.map(Ok).forward(write);
-    let ws_to = {
-        read.for_each(|message| async {
-            let data = message.unwrap().into_data();
-            if data.len() > 0 {
-                handle_packet(data).await;
+    write.send(Message::Binary(handshake_packet)).await.unwrap();
+    
+    let handle =tokio::spawn(async move {
+        loop{
+            tokio::select!{
+                msg = read.next() => {
+                    match msg {
+                        Some(msg) => {
+                            let data = msg.unwrap().into_data();
+                            if data.len() > 0 {
+                                handle_packet(data).await;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = interval.tick() => {
+                    write.send(Message::Binary(bili::encode("", 2))).await.unwrap();
+                }
             }
-        })
-    };
+        }
+    });
 
-    pin_mut!(to_ws, ws_to);
-    future::select(to_ws, ws_to).await;
+    tokio::join!(handle);
 }
 
 async fn handle_packet(data: Vec<u8>) {
     let packet = bili::decode(data);
-    println!("Recieved packet: {}", packet.op);
+    info!("Recieved packet: {}", packet.op);
     match packet.op {
         8 => {
-            println!("加入房间");
+            info!("加入房间");
         }
 
         5 => {
-            match serde_json::from_str(&packet.body.unwrap()) {
-                Ok::<Value, _>(data) => {
-                    match data["cmd"].as_str() {
-                        Some(cmd) => match cmd {
-                            "DANMU_MSG" => {
-                                println!("DANMU_MSG");
-                                println!(
-                                    "{}: {}",
-                                    //data["info"][3][1],
-                                    //data["info"][3][0],
-                                    data["info"][2][1],
-                                    data["info"][1]
-                                );
-                            }
-
-                            "SEND_GIFT" => {
-                                println!(
-                                    "{}送了{}个{}",
-                                    data["data"]["uname"],
-                                    data["data"]["action"],
-                                    data["data"]["giftName"]
-                                );
-                            }
-
-                            "WELCOME" => {
-                                println!("欢迎 {}", data["data"]["uname"]);
-                            }
-
-                            _ => {
-                                println!("Unknown msg type MSG:{:?}", data["cmd"]);
+            for body in packet.body {
+                match serde_json::from_str(&body.unwrap()) {
+                    Ok::<Value, _>(data) => {
+                        match data["cmd"].as_str() {
+                            Some(cmd) => match cmd {
                                 
+                                "DANMU_MSG" => {
+                                    info!(
+                                        "{}: {}",
+                                        //data["info"][3][1],
+                                        //data["info"][3][0],
+                                        data["info"][2][1],
+                                        data["info"][1]
+                                    );
+                                }
+    
+                                "SEND_GIFT" => {
+                                    info!(
+                                        "{}送了{}个{}",
+                                        data["data"]["uname"],
+                                        data["data"]["action"],
+                                        data["data"]["giftName"]
+                                    );
+                                }
+    
+                                "WELCOME" => {
+                                    info!("欢迎 {}", data["data"]["uname"]);
+                                }
+    
+                                _ => {
+                                    //info!("Unknown msg type MSG:{:?}", data["cmd"]);
+                                    
+                                }
+                            },
+                            None => {
+                                return;
                             }
-                        },
-                        None => {
-                            println!("parse error");
-                            return;
-                        }
-                    };
-                }
-                Err(e) => {
-                    println!("json解析错误 {}", e);
-                    return;
-                }
-            };
+                        };
+                    }
+                    Err(e) => {
+                        error!("json解析错误 {}", e);
+                        return;
+                    }
+                };
+            }
         }
 
         3 => {
-            let data: Value = serde_json::from_str(&packet.body.unwrap()).unwrap();
-            println!("人气: {}", data["count"]);
+            let data: Value = serde_json::from_str(&packet.body[0].as_ref().unwrap()).unwrap();
+            info!("人气: {}", data["count"]);
         }
 
         _ => {}
     }
 }
 
-async fn heartbeat(tx: mpsc::UnboundedSender<Message>) {
-    let heartbeat_packet = bili::encode("", 2);
-    let mut freq = time::interval(Duration::from_secs(30));
-    let mut started = false;
-    loop {
-        freq.tick().await;
-        if started {
-            tx.unbounded_send(Message::binary(heartbeat_packet.clone()))
-                .unwrap();
-            println!("sent heartbeat");
-        }
-        started = true;
-    }
-}
